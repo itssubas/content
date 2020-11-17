@@ -1,4 +1,5 @@
 import json
+from ast import literal_eval
 import functools
 import urllib
 from collections import OrderedDict
@@ -11,6 +12,10 @@ from mitmproxy.script import concurrent
 from mitmproxy.addons.serverplayback import ServerPlayback
 from time import ctime
 from dateparser import parse
+import logging
+
+logging.basicConfig(level=logging.DEBUG,
+                    format='[%(asctime)s] - [%(funcName)s] - %(message)s')
 
 
 def record_concurrently(replaying: bool = False):
@@ -27,14 +32,16 @@ def record_concurrently(replaying: bool = False):
     Returns:
         (function): decorator
     '''
-    print(f'replaying={replaying}')
+    logging.info(f'replaying={replaying}')
     if replaying:
         def nonconcurrent_decorator(func):
             @functools.wraps(func)
             def passthrough_wrapper(*args, **kwargs):
                 value = func(*args, **kwargs)
                 return value
+
             return passthrough_wrapper
+
         return nonconcurrent_decorator
     else:
         return concurrent
@@ -89,26 +96,26 @@ class TimestampReplacer:
 
     def running(self):
         if ctx.options.debug:
-            print(f'ctx.options={ctx.options}')
+            logging.info(f'ctx.options={ctx.options}')
 
         self.bad_keys_filepath = ctx.options.keys_filepath
         if ctx.options.detect_timestamps:
-            print('Detecting Timestamp Fields')
+            logging.info('Detecting Timestamp Fields')
             self.detect_timestamps = True
         self.load_problematic_keys()
 
     def _debug_request(self, flow: flow.Flow) -> None:
         '''Print details of the request'''
         req = flow.request
-        print(f'{req.method} {req.pretty_url}')
+        logging.info(f'{req.method} {req.pretty_url}')
         _, _, path, _, query, _ = urllib.parse.urlparse(req.url)
         queriesArray = urllib.parse.parse_qsl(query, keep_blank_values=True)
-        print(f'queriesArray={queriesArray}')
+        logging.info(f'queriesArray={queriesArray}')
         if req.multipart_form:
-            print(f'multipart_form data = {req.multipart_form.items()}')
+            logging.info(f'multipart_form data = {req.multipart_form.items()}')
         if req.urlencoded_form:
-            print(f'urlencoded_form data = {req.urlencoded_form.items()}')
-        print(f'hashed_data={ServerPlayback._hash(self, flow)}')
+            logging.info(f'urlencoded_form data = {req.urlencoded_form.items()}')
+        logging.info(f'hashed_data={ServerPlayback._hash(self, flow)}')
 
     # @record_concurrently(
     #     replaying=bool(
@@ -123,10 +130,10 @@ class TimestampReplacer:
         if ctx.options.script_mode == 'record':
             if ctx.options.detect_timestamps:
                 self.run_all_key_detections(req)
-                print('updating problem_keys file at "{}"'.format(self.bad_keys_filepath))
+                logging.info('updating problem_keys file at "{}"'.format(self.bad_keys_filepath))
                 self.update_problem_keys_file()
         elif ctx.options.script_mode in {'clean', 'playback'}:
-            print(f'mode={ctx.options.script_mode} cleaning problematic key values from the request')
+            logging.info(f'mode={ctx.options.script_mode} cleaning problematic key values from the request')
             self.clean_bad_keys(req)
 
     def clean_bad_keys(self, req: HTTPRequest) -> None:
@@ -147,7 +154,7 @@ class TimestampReplacer:
             req (HTTPRequest): The request to modify
         '''
         query_data = req._get_query()
-        print('fetched query_data: {}'.format(query_data))
+        logging.info('fetched query_data: {}'.format(query_data))
         updated_query_data = []
         if query_data and self.query_keys:
             for key, val in query_data:
@@ -156,7 +163,7 @@ class TimestampReplacer:
                 else:
                     updated_query_data.append((key, val))
             req._set_query(updated_query_data)
-            print(f'updated query_data: {req._get_query()}')
+            logging.info(f'updated query_data: {req._get_query()}')
 
     def clean_urlencoded_form(self, req: HTTPRequest) -> None:
         '''Replace any problematic values of urlencoded form keys with constant data
@@ -200,10 +207,15 @@ class TimestampReplacer:
                 content = req.raw_content.decode()
             else:
                 content = ''
+            logging.info(f'cleaning json body: content={content}')
             json_data = content.startswith('{')
             if json_data:
-                content = json.loads(content, object_pairs_hook=OrderedDict)
-                self.modify_json_body(req, content)
+                try:
+                    content = OrderedDict(literal_eval(content))
+                    # content = json.loads(content, object_pairs_hook=OrderedDict)
+                    self.modify_json_body(req, content)
+                except Exception:
+                    logging.exception(f'failed to run literal_eval on content {content}')
 
     def modify_json_body(self, req: HTTPRequest, json_body: dict) -> None:
         '''Modify the json body of a request by replacing any timestamp data with constant data
@@ -215,13 +227,13 @@ class TimestampReplacer:
         original_content = deepcopy(json_body)
         modified = False
         keys_to_replace = self.json_keys
-        print('{}'.format(keys_to_replace))
+        logging.info('{}'.format(keys_to_replace))
         for key_path in keys_to_replace:
             body = json_body
             keys = key_path.split('.')
-            print('keypath parts: {}'.format(keys))
+            logging.info('keypath parts: {}'.format(keys))
             lastkey = keys[-1]
-            print('lastkey: {}'.format(lastkey))
+            logging.info('lastkey: {}'.format(lastkey))
             skip_key = False
             for k in keys[:-1]:
                 if k in body:
@@ -236,16 +248,16 @@ class TimestampReplacer:
                     break
             if not skip_key:
                 if lastkey in body:
-                    print('modifying request to "{}"'.format(req.pretty_url))
+                    logging.info('modifying request to "{}"'.format(req.pretty_url))
                     body[lastkey] = self.constant
                     modified = True
                 elif isinstance(body, list) and lastkey.isdigit() and int(lastkey) <= len(body) - 1:
-                    print('modifying request to "{}"'.format(req.pretty_url))
+                    logging.info('modifying request to "{}"'.format(req.pretty_url))
                     body[int(lastkey)] = self.constant
                     modified = True
         if modified:
-            print('original request body:\n{}'.format(json.dumps(original_content, indent=4)))
-            print('modified request body:\n{}'.format(json.dumps(json_body, indent=4)))
+            logging.info('original request body:\n{}'.format(json.dumps(original_content, indent=4)))
+            logging.info('modified request body:\n{}'.format(json.dumps(json_body, indent=4)))
             req.set_content(json.dumps(json_body).encode())
 
     def run_all_key_detections(self, req: HTTPRequest) -> None:
@@ -264,7 +276,7 @@ class TimestampReplacer:
 
     def handle_url_query(self, req: HTTPRequest) -> None:
         query_data = req._get_query()
-        print('query_data: {}'.format(query_data))
+        logging.info('query_data: {}'.format(query_data))
         for key, val in query_data:
             # don't bother trying to interpret an argument less than 4 characters as some type of timestamp
             if len(val) > 4:
@@ -309,11 +321,15 @@ class TimestampReplacer:
                 content = req.raw_content.decode()
             else:
                 content = ''
+            logging.info(f'handling json body: content={content}')
             json_data = content.startswith('{')
             if json_data:
-                content = json.loads(content, object_pairs_hook=OrderedDict)
-                json_keys = self.determine_problematic_keys(content)
-                self.json_keys.update(json_keys)
+                try:
+                    content = OrderedDict(literal_eval(content))
+                    json_keys = self.determine_problematic_keys(content)
+                    self.json_keys.update(json_keys)
+                except Exception:
+                    logging.exception(f'failed to run literal_eval on content {content}')
 
     def determine_problematic_keys(self, content: dict) -> List[str]:
         '''Given a json request body, return the keys (in dot notation) whose values are potentially timestamp data.
@@ -325,6 +341,7 @@ class TimestampReplacer:
             List[str]: A list of keys (in dot notation, e.g. 'query.filter.time' is an example of what could be one
                 problematic key) whose values are potentially timestamp data.
         '''
+
         def travel_dict(obj: Union[dict, list], key_path='') -> List[str]:
             bad_key_paths = []
             if isinstance(obj, dict):
@@ -376,6 +393,7 @@ class TimestampReplacer:
                             if parsed_date:
                                 bad_key_paths.append(sub_key_path)
             return bad_key_paths
+
         bad_keys = travel_dict(content)
         return bad_keys
 
@@ -395,9 +413,9 @@ class TimestampReplacer:
         '''Load problematic keys dictionary from the keys_filepath argument filepath in content-test-data repo
         if it exists. Otherwise, return the dictionary with empty values.
         '''
-        print('executing "read_in_problematic_keys" method')
+        logging.info('executing "read_in_problematic_keys" method')
         repo_bad_keys_filepath = self.bad_keys_filepath.replace('/tmp/Mocks', 'content-test-data')
-        print('reading in problematic keys data from "{}"'.format(repo_bad_keys_filepath))
+        logging.info('reading in problematic keys data from "{}"'.format(repo_bad_keys_filepath))
         if not path.exists(self.bad_keys_filepath) and path.exists(repo_bad_keys_filepath):
             with open(repo_bad_keys_filepath, 'r') as fp:
                 problem_keys = json.load(fp)
@@ -425,9 +443,9 @@ class TimestampReplacer:
         '''Load problematic keys from the keys_filepath argument filepath if it exists. Only necessary when running
         mitmdump in playback mode. Resets command line options with the key value pairs from the loaded dictionary.
         '''
-        print('executing "load_problematic_keys" method')
+        logging.info('executing "load_problematic_keys" method')
         if path.exists(self.bad_keys_filepath):
-            print('"{}" path exists - loading bad keys'.format(self.bad_keys_filepath))
+            logging.info('"{}" path exists - loading bad keys'.format(self.bad_keys_filepath))
 
             problem_keys = json.load(open(self.bad_keys_filepath, 'r'))
 
@@ -438,13 +456,13 @@ class TimestampReplacer:
             json_keys = problem_keys.get('keys_to_replace')
             self.json_keys.update(json_keys.split() if isinstance(json_keys, str) else json_keys)
 
-            print('bad keys loaded\n---------------')
-            print(f'self.query_keys={self.query_keys}')
-            print(f'self.form_keys={self.form_keys}')
-            print(f'self.json_keys={self.json_keys}')
+            logging.info('bad keys loaded\n---------------')
+            logging.info(f'self.query_keys={self.query_keys}')
+            logging.info(f'self.form_keys={self.form_keys}')
+            logging.info(f'self.json_keys={self.json_keys}')
         else:
-            print('"{}" path doesn\'t exist - no bad keys to set'.format(self.bad_keys_filepath))
-            print('not setting bad keys from file')
+            logging.info('"{}" path doesn\'t exist - no bad keys to set'.format(self.bad_keys_filepath))
+            logging.info('not setting bad keys from file')
 
 
 # mitmproxy picks up the contents of the addons global list and loads what it finds into the addons mechanism.
